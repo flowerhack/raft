@@ -1,0 +1,3 @@
+# .gitignore for raft
+*.pyc
+.DS_Store

@@ -2,28 +2,24 @@
 Client-side raft code
 """
 
-import json
-import socket
-import sys
+import asyncio
 
-class Client(object):
-	TCP_IP = '127.0.0.1'
-	TCP_PORT = 55534
-	BUFFER_SIZE = 1024
+class EchoClient(asyncio.Protocol):
+    message = 'This is the message. It will be echoed.'
 
-	# TODO put this in a stdin loop
+    def connection_made(self, transport):
+        transport.write(self.message.encode())
+        print('data sent: {}'.format(self.message))
 
-	message = {}
-	message['sender'] = 'CLIENT'
+    def data_received(self, data):
+        print('data received: {}'.format(data.decode()))
 
-	s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-	s.connect((TCP_IP, TCP_PORT))
-	print "Please input commands."
-	while True:
-		line = sys.stdin.readline()
-		message['message'] = line
-		s.send(json.dumps(message))
-		print "Message sent!"
-		data = s.recv(BUFFER_SIZE)
-	s.close()
-	print "Received data:", data
+    def connection_lost(self, exc):
+        print('server closed the connection')
+        asyncio.get_event_loop().stop()
+
+loop = asyncio.get_event_loop()
+coro = loop.create_connection(EchoClient, '127.0.0.1', 55534)
+loop.run_until_complete(coro)
+loop.run_forever()
+loop.close()

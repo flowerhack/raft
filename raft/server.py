@@ -7,6 +7,11 @@ import config
 import logging as syslog
 import json
 import time
+import asyncio
+import functools
+import os
+import signal
+import pdb
 
 import socket
 from random import choice, randint
@@ -19,7 +24,7 @@ MESSAGE_TYPES = ['AppendEntries', 'AppendEntriesCommitted', 'AcceptAppendEntries
 # handle_request -> process_[type]_request -> [broadcast,send]_request
 
 class Server(object):
-    def __init__(self):
+    def __init__(self, loop):
         self.id = 1  # TODO Replace with UUID
         self.status = 'FOLLOWER'  # TODO Change! Loading as 'LEADER' only for test purposes!
         self.term = 1 # Persist to stable storage
@@ -27,13 +32,16 @@ class Server(object):
         self.voted_for = self.id # Persist to stable storage
         self.leader_id = None
         self.active = True
-        self.election_timeout = randint(100,500)
+        self.election_timeout = randint(100,500)/1000
         self.start_time = time.clock()
         self.vote_count = 0
         self.valid_rpc_received = False
+        self.loop = loop
+        self.init_timeouts()
 
 # -------------- Handling and Processing Requests --------------
 
+    @asyncio.coroutine
     def handle_request(self, message):
         """ Handles all incoming requests """
         # Parse out information sent
@@ -43,13 +51,17 @@ class Server(object):
 
         # Perform appropriate action based on sender type
         if sender == 'CLIENT':
-            self.process_client_request(message)
+            response = yield from self.process_client_request(message)
         elif sender == 'CANDIDATE':
-            self.process_candidate_request(message)
+            response = yield from self.process_candidate_request(message)
         elif sender == 'LEADER':
-            self.process_leader_request(message)
+            response = yield from self.process_leader_request(message)
         elif sender == 'FOLLOWER':
-            self.process_follower_request(message)
+            response = yield from self.process_follower_request(message)
+        else:
+            response = "Error"
+
+        return response
 
     def process_follower_request(self, sender, message):
         """ Handle requests issued by followers. """
@@ -112,15 +124,26 @@ class Server(object):
         self.broadcast_request('Heartbeat')
 
     def start_new_election(self):
+        """ Start a new election and announce self as a candidate. """
+        print('Starting new election')  # DEBUGMSG
         self.term = self.term + 1
         self.state = 'CANDIDATE'
         self.vote = self.id
         self.broadcast_request('RequestVote')
 
     def check_timeouts(self):
-        if (time.clock() - self.start_time) > self.election_timeout:
-            if not (self.valid_rpc_received or self.vote_granted): 
-                self.start_new_election()
+        """ Check to see if a new election needs to be called. """
+        print('Checking timeouts')  # DEBUGMSG
+        if not self.valid_rpc_received:
+            self.start_new_election()
+        else:
+            self.election_timeout = randint(100,500)
+            self.loop.call_later(self.election_timeout, self.check_timeouts)
+
+    # This function may not be necessary.
+    def init_timeouts(self):
+        print('Initializing timeouts')  # DEBUGMSG
+        self.loop.call_later(self.election_timeout, self.check_timeouts)
 
     def consistency_check(self):
         """
@@ -155,8 +178,14 @@ class Server(object):
         if msg_type == 'RequestVote':
             message['candidate_id'] = self.id  # Candidates send their own RequestVotes
             message['term'] = self.term
-            message['last_log_index'] = self.raftlog.HOWHANDLE
-            message['last_log_term'] = self.raftlog.HOWHANDLE
+            try:
+                message['last_log_index'] = self.raftlog[-1][0]
+            except:
+                message['last_log_index'] = None
+            try:
+                message['last_log_term'] = self.raftlog[-1][1]
+            except:
+                message['last_log_term'] = None
 
         if msg_type == 'Heartbeat':
             message['sender_id'] = self.id
@@ -177,47 +206,64 @@ class Server(object):
 
 # -------------- Sending, Broadcasting Requests --------------
 
-    def broadcast_request(self, type):
-        for server in config.SERVER_IDS:
-            pass
+    @classmethod
+    def got_result(future):
+        print (future.result())
 
-    def send_request(self, msg_type, data):
-        # Open up a socket
-        # Send to socket
-        json(dumps(self.craft_message(msg_type, data)))
-        # Close socket
+    def broadcast_request(self, msg_type, data=None):
+        """ Broadcrast a msg_type request to all servers """
+        for server in config.SERVER_IDS:
+            future = asyncio.Future()
+            asyncio.Task(self.send_request(future, server, msg_type, data))
+            future.add_done_callback(Server.got_result)
+            self.loop.call_soon(future)
+
+    
+
+    @asyncio.coroutine
+    def send_request(self, future, target, msg_type, data=None):
+        """ Send a msg_type request to target server """
+        # TODO handle the case where the connection is refused! ConnectionRefusedError
+        reader, writer = yield from asyncio.open_connection(target[0], target[1])
+        while True:
+            line = yield from reader.readline()
+            if not line:
+                break
+        future.set_result('Future is done!')
 
     def forward_request(self, data):
+        """ Forward a request to the leader """
         pass
 
 # -------------- TCP listener --------------
     # I should probably abstract out the protocol at some point.
 
-    def run(self):
-        print "yo"
-        TCP_IP = '127.0.0.1'
-        TCP_PORT = 55534
-        BUFFER_SIZE = 1024
+    def connection_made(self, transport):
+        print('Connection received')
+        self.transport = transport
 
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        # This line is for testing only! TODO remove!
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        s.bind((TCP_IP, TCP_PORT))
-        s.listen(True)
+    def data_received(self, data):
+        print('Data received')
+        response = yield from self.handle_request(data)
 
-        conn, addr = s.accept()
+        self.transport.write(response)
 
-        # Busyloop that listens to incoming requests.
-        while (self.active):
-            print "Running..."
-            data = conn.recv(BUFFER_SIZE)
-            if data:
-                print "Requst received"
-                response = self.handle_request(json.loads(data))
-                conn.send(response)
-            else:
-                self.check_timeouts()
-        conn.close()
+        self.transport.close()
 
-server = Server()
-server.run()
+    def connection_lost(self, exec):
+        pass
+
+TCP_IP = '127.0.0.1'
+TCP_PORT = 55534
+
+loop = asyncio.get_event_loop()
+coro = loop.create_server(functools.partial(Server, loop=loop), TCP_IP, TCP_PORT)
+server = loop.run_until_complete(coro)
+print('Serving requests')
+try:
+    loop.run_forever()
+except KeyboardInterrupt:
+    print("exit")
+finally:
+    server.close()
+    loop.close()
