@@ -12,6 +12,7 @@ import functools
 import os
 import signal
 import pdb
+import sys
 
 import socket
 from random import choice, randint
@@ -206,33 +207,32 @@ class Server(object):
 
 # -------------- Sending, Broadcasting Requests --------------
 
-    @classmethod
-    def got_result(future):
-        print (future.result())
-
     def broadcast_request(self, msg_type, data=None):
         """ Broadcrast a msg_type request to all servers """
         for server in config.SERVER_IDS:
-            future = asyncio.Future()
-            asyncio.Task(self.send_request(future, server, msg_type, data))
-            future.add_done_callback(Server.got_result)
-            self.loop.call_soon(future)
-
-    
+            if not ((server[0] == TCP_IP) and (server[1] == TCP_PORT)):
+                asyncio.Task(self.send_request(server, msg_type, data))
 
     @asyncio.coroutine
-    def send_request(self, future, target, msg_type, data=None):
+    def send_request(self, target, msg_type, data=None):
         """ Send a msg_type request to target server """
         # TODO handle the case where the connection is refused! ConnectionRefusedError
-        reader, writer = yield from asyncio.open_connection(target[0], target[1])
-        while True:
-            line = yield from reader.readline()
-            if not line:
-                break
-        future.set_result('Future is done!')
+        try:
+            reader, writer = yield from asyncio.open_connection(target[0], target[1])
+            while True:
+                line = yield from reader.readline()
+                if not line:
+                    break
+        except ConnectionRefusedError:
+            # TODO: handle the case where we never get a response back;
+            # do we need to explicitly declare servers "dead"?
+            pass
 
     def forward_request(self, data):
         """ Forward a request to the leader """
+        pass
+
+    def eof_received(self):
         pass
 
 # -------------- TCP listener --------------
@@ -253,8 +253,8 @@ class Server(object):
     def connection_lost(self, exec):
         pass
 
-TCP_IP = '127.0.0.1'
-TCP_PORT = 55534
+TCP_IP = str(sys.argv[1])
+TCP_PORT = int(sys.argv[2])
 
 loop = asyncio.get_event_loop()
 coro = loop.create_server(functools.partial(Server, loop=loop), TCP_IP, TCP_PORT)
